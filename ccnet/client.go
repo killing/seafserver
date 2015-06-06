@@ -7,9 +7,9 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"github.com/killing/seafserver/log"
 	"github.com/killing/searpc"
 	"io"
-	"log"
 	"net"
 	"strings"
 	"sync"
@@ -23,6 +23,9 @@ const (
 const (
 	StatusCodeProcDead   string = "102"
 	StatusStringProcDead string = "Processor Is Dead"
+
+	StatusCodeProcDone   string = "103"
+	StatusStringProcDone string = "Processor Is Done"
 
 	StatusCodeOK   string = "200"
 	StatusStringOK string = "OK"
@@ -97,7 +100,7 @@ func NewClient(confDir string, rpcServer *searpc.Server) (client *Client, err er
 	var conn net.Conn
 	unixSockPath := confDir + "/" + unixSockName
 	if conn, err = net.Dial("unix", unixSockPath); err != nil {
-		log.Println(err.Error())
+		log.Errorln(err.Error())
 		return
 	}
 
@@ -136,7 +139,7 @@ func (client *Client) RegisterProc(procName string) error {
 		return err
 	}
 	if msg.MsgType != MsgTypeResponse || msg.Code != StatusCodeOK {
-		log.Println(msg.MsgType, msg.Code)
+		log.Errorln(msg.MsgType, msg.Code)
 		errMsg = "ccnet: Received bad response for request"
 		return errors.New(errMsg)
 	}
@@ -175,7 +178,7 @@ func (client *Client) NextReqId() (reqId int32) {
 func (client *Client) writeHeader(msgType uint8, reqId int32, contentLen uint16) error {
 	var err error
 
-	log.Println("Writing message header:", reqId, msgType, contentLen)
+	log.Debugln("Writing message header:", reqId, msgType, contentLen)
 
 	if err = client.rw.WriteByte(byte(protocolVersion)); err != nil {
 		return err
@@ -199,7 +202,7 @@ func (client *Client) writeHeader(msgType uint8, reqId int32, contentLen uint16)
 func (client *Client) writeMessage(msg *Message) error {
 	var err error
 
-	log.Println("Writing message body:", string(msg.Content))
+	log.Debugln("Writing message body:", string(msg.Content))
 
 	switch msg.MsgType {
 	case MsgTypeRequest:
@@ -229,7 +232,8 @@ func (client *Client) writeMessage(msg *Message) error {
 
 		return err
 	default:
-		log.Panic("ccnet: invalid message type.")
+		log.Errorln("ccnet: invalid message type.")
+		panic("ccnet: invalid message type.")
 	}
 
 	return nil
@@ -270,7 +274,7 @@ func (client *Client) RecvMessage() (reqId int32, msg *Message, err error) {
 func (client *Client) readHeader() (msgType uint8, reqId int32, msgLen uint16, err error) {
 	var version uint8
 
-	log.Println("Reading message header")
+	log.Debugln("Reading message header")
 
 	if version, err = client.rw.ReadByte(); err != nil {
 		return
@@ -280,25 +284,25 @@ func (client *Client) readHeader() (msgType uint8, reqId int32, msgLen uint16, e
 		return
 	}
 
-	log.Println("Message version", version)
+	log.Debugln("Message version", version)
 
 	if msgType, err = client.rw.ReadByte(); err != nil {
 		return
 	}
 
-	log.Println("Message type", msgType)
+	log.Debugln("Message type", msgType)
 
 	if err = binary.Read(client.rw, binary.BigEndian, &msgLen); err != nil {
 		return
 	}
 
-	log.Println("Message length", msgLen)
+	log.Debugln("Message length", msgLen)
 
 	if err = binary.Read(client.rw, binary.BigEndian, &reqId); err != nil {
 		return
 	}
 
-	log.Println("Request ID", reqId)
+	log.Debugln("Request ID", reqId)
 
 	return
 }
@@ -312,7 +316,7 @@ func (client *Client) readMessage(msgType uint8, msgLen int) (msg *Message, err 
 		return
 	}
 
-	log.Println("Read message body:", string(buf))
+	log.Debugln("Read message body:", string(buf))
 
 	switch msgType {
 	case MsgTypeRequest:
@@ -393,6 +397,14 @@ func (client *Client) Run() error {
 			}
 			client.SendMessage(reqId, &resp)
 		case MsgTypeUpdate:
+			if msg.Code[0] == '5' ||
+				msg.Code == StatusCodeProcDead ||
+				msg.Code == StatusCodeProcDone {
+				log.Errorf("Bad update code %s, shutdown processor %d\n", msg.Code, reqId)
+				delete(client.procMap, int(reqId))
+				continue
+			}
+
 			if procName = client.procMap[int(reqId)]; procName == "" {
 				resp = Message{
 					MsgTypeResponse,
